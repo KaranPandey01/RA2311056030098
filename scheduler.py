@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -21,7 +21,7 @@ class LoggingMiddleware:
         self.log_file = log_file
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def _write(self, level: str, message: str, context: Dict[str, Any] | None = None) -> None:
+    def _write(self, level: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": level,
@@ -31,16 +31,16 @@ class LoggingMiddleware:
         with self.log_file.open("a", encoding="utf-8") as file:
             file.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
-    def info(self, message: str, context: Dict[str, Any] | None = None) -> None:
+    def info(self, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         self._write("INFO", message, context)
 
-    def warning(self, message: str, context: Dict[str, Any] | None = None) -> None:
+    def warning(self, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         self._write("WARNING", message, context)
 
-    def error(self, message: str, context: Dict[str, Any] | None = None) -> None:
+    def error(self, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         self._write("ERROR", message, context)
 
-    def success(self, message: str, context: Dict[str, Any] | None = None) -> None:
+    def success(self, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         self._write("SUCCESS", message, context)
 
 
@@ -56,56 +56,66 @@ def write_report(lines: List[str]) -> None:
     REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_failure_report(reason: str) -> None:
+def write_failure_report(reason: str, next_step: str) -> None:
     lines = [
         "Vehicle Maintenance Scheduling Output",
         "=" * 50,
-        "Run Status: FAILED",
-        f"Reason: {reason}",
+        "Status: This run could not be completed.",
         "",
-        'PowerShell example: $env:API_TOKEN = "real-token-here"',
-        "Then run: python .\\scheduler.py",
+        f"What went wrong: {reason}",
+        "",
+        "What to do next:",
+        next_step,
     ]
     write_report(lines)
 
 
-def fetch_api_data(url: str, token: str, logger: LoggingMiddleware) -> Dict[str, Any]:
+def fetch_api_data(
+    url: str,
+    token: str,
+    logger: LoggingMiddleware,
+) -> Tuple[Dict[str, Any], Optional[str]]:
     headers = {"Authorization": f"Bearer {token.strip()}"}
     response = None
 
-    logger.info("Sending API request", {"url": url})
+    logger.info("Trying to load data from the API.", {"url": url})
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
         logger.info(
-            "Received API response",
+            "The API responded.",
             {"url": url, "status_code": response.status_code},
         )
 
         if response.status_code == 401:
-            logger.error(
-                "Unauthorized API request",
-                {"url": url, "reason": "API token is invalid or expired"},
+            reason = (
+                "The API returned 401 Unauthorized. "
+                "The token is probably missing, incorrect, or expired."
             )
-            return {}
+            logger.error("The API rejected the request.", {"url": url, "status_code": 401})
+            return {}, reason
 
         response.raise_for_status()
         payload = response.json()
-        logger.success("Parsed API response successfully", {"url": url})
-        return payload
+        logger.success("The response was loaded successfully.", {"url": url})
+        return payload, None
 
     except requests.exceptions.Timeout:
-        logger.error("API request timed out", {"url": url})
+        reason = "The request timed out before the API could respond."
+        logger.error("The request timed out.", {"url": url})
+        return {}, reason
     except requests.exceptions.RequestException as exc:
-        logger.error("API request failed", {"url": url, "error": str(exc)})
+        reason = f"The request failed: {exc}"
+        logger.error("The request failed.", {"url": url, "error": str(exc)})
+        return {}, reason
     except ValueError:
         body = response.text if response is not None else "<no response>"
+        reason = "The API responded, but the response was not valid JSON."
         logger.error(
-            "API response was not valid JSON",
+            "The API response could not be parsed as JSON.",
             {"url": url, "response_body": body[:500]},
         )
-
-    return {}
+        return {}, reason
 
 
 def solve_knapsack(
@@ -114,13 +124,13 @@ def solve_knapsack(
     logger: LoggingMiddleware,
 ) -> Tuple[int, int, List[VehicleTask]]:
     logger.info(
-        "Starting knapsack calculation",
+        "Starting the schedule calculation.",
         {"task_count": len(tasks), "capacity": capacity},
     )
 
     if capacity <= 0 or not tasks:
         logger.warning(
-            "Knapsack skipped due to empty tasks or non-positive capacity",
+            "No schedule could be built because the capacity or task list was empty.",
             {"task_count": len(tasks), "capacity": capacity},
         )
         return 0, 0, []
@@ -156,7 +166,7 @@ def solve_knapsack(
     selected_tasks.reverse()
 
     logger.success(
-        "Knapsack calculation completed",
+        "The best schedule for this depot has been calculated.",
         {
             "capacity": capacity,
             "selected_task_count": len(selected_tasks),
@@ -172,7 +182,7 @@ def parse_vehicle_tasks(vehicle_data: Dict[str, Any], logger: LoggingMiddleware)
 
     for vehicle in vehicle_data.get("vehicles", []):
         if not all(key in vehicle for key in ("TaskID", "Duration", "Impact")):
-            logger.warning("Skipping vehicle with missing fields", {"vehicle": vehicle})
+            logger.warning("A vehicle record was skipped because fields were missing.", {"vehicle": vehicle})
             continue
 
         try:
@@ -183,9 +193,9 @@ def parse_vehicle_tasks(vehicle_data: Dict[str, Any], logger: LoggingMiddleware)
             )
             tasks.append(task)
         except (TypeError, ValueError):
-            logger.warning("Skipping vehicle with invalid field types", {"vehicle": vehicle})
+            logger.warning("A vehicle record was skipped because the values were invalid.", {"vehicle": vehicle})
 
-    logger.info("Finished parsing vehicle tasks", {"valid_task_count": len(tasks)})
+    logger.info("Vehicle task parsing is complete.", {"valid_task_count": len(tasks)})
     return tasks
 
 
@@ -197,12 +207,12 @@ def build_depot_report(
     selected_tasks: List[VehicleTask],
 ) -> List[str]:
     lines = [
-        f"Depot ID: {depot_id}",
-        f"Available Mechanic Hours: {capacity}",
-        f"Total Impact Score: {max_impact}",
-        f"Total Hours Used: {total_duration}/{capacity}",
-        f"Number of Tasks Selected: {len(selected_tasks)}",
-        "Selected Task Details:",
+        f"Depot {depot_id}",
+        f"Mechanic hours available: {capacity}",
+        f"Best total impact score: {max_impact}",
+        f"Hours used: {total_duration} out of {capacity}",
+        f"Tasks selected: {len(selected_tasks)}",
+        "Chosen tasks:",
     ]
 
     if selected_tasks:
@@ -212,7 +222,7 @@ def build_depot_report(
                 f"(Duration: {task.duration}, Impact: {task.impact})"
             )
     else:
-        lines.append("  - No tasks scheduled.")
+        lines.append("  - No tasks were selected for this depot.")
 
     lines.append("-" * 50)
     return lines
@@ -221,7 +231,7 @@ def build_depot_report(
 def main() -> int:
     logger = LoggingMiddleware(LOG_FILE)
     logger.info(
-        "Vehicle scheduling run started",
+        "The vehicle scheduling run has started.",
         {
             "depot_api_url": DEPOT_API_URL,
             "vehicles_api_url": VEHICLES_API_URL,
@@ -238,38 +248,57 @@ def main() -> int:
     }
 
     if api_token in placeholder_tokens:
-        reason = "API_TOKEN is missing or still set to a placeholder value."
+        reason = "No real API token was found in the API_TOKEN environment variable."
+        next_step = 'Set the token first, for example: $env:API_TOKEN = "your-real-token"'
         logger.error(reason)
-        write_failure_report(reason)
+        write_failure_report(reason, next_step)
         return 1
 
-    depot_data = fetch_api_data(DEPOT_API_URL, api_token, logger)
-    if not depot_data or "depots" not in depot_data or not isinstance(depot_data["depots"], list):
-        reason = "Could not fetch or parse depot data."
+    depot_data, depot_error = fetch_api_data(DEPOT_API_URL, api_token, logger)
+    if depot_error:
+        logger.error("The depot data could not be loaded.", {"reason": depot_error})
+        write_failure_report(
+            "We could not load the depot list from the API. " + depot_error,
+            'Make sure API_TOKEN contains the real bearer token, then run: python .\\scheduler.py',
+        )
+        return 1
+
+    if "depots" not in depot_data or not isinstance(depot_data["depots"], list):
+        reason = "The depot API responded, but the data format was not what the script expected."
         logger.error(reason, {"payload": depot_data})
-        write_failure_report(reason)
+        write_failure_report(reason, "Check the API response format and run the script again.")
         return 1
 
-    vehicle_data = fetch_api_data(VEHICLES_API_URL, api_token, logger)
-    if not vehicle_data or "vehicles" not in vehicle_data or not isinstance(vehicle_data["vehicles"], list):
-        reason = "Could not fetch or parse vehicle data."
+    vehicle_data, vehicle_error = fetch_api_data(VEHICLES_API_URL, api_token, logger)
+    if vehicle_error:
+        logger.error("The vehicle data could not be loaded.", {"reason": vehicle_error})
+        write_failure_report(
+            "We could not load the vehicle task list from the API. " + vehicle_error,
+            'Make sure API_TOKEN contains the real bearer token, then run: python .\\scheduler.py',
+        )
+        return 1
+
+    if "vehicles" not in vehicle_data or not isinstance(vehicle_data["vehicles"], list):
+        reason = "The vehicle API responded, but the data format was not what the script expected."
         logger.error(reason, {"payload": vehicle_data})
-        write_failure_report(reason)
+        write_failure_report(reason, "Check the API response format and run the script again.")
         return 1
 
     tasks = parse_vehicle_tasks(vehicle_data, logger)
     if not tasks:
-        reason = "No valid vehicle tasks were returned by the API."
+        reason = "The vehicle API response did not contain any valid tasks to schedule."
         logger.error(reason)
-        write_failure_report(reason)
+        write_failure_report(reason, "Check the vehicle data coming from the API and try again.")
         return 1
 
     depots = depot_data["depots"]
     report_lines = [
         "Vehicle Maintenance Scheduling Output",
         "=" * 50,
-        f"Total Depots Received: {len(depots)}",
-        f"Total Valid Vehicle Tasks Received: {len(tasks)}",
+        "Status: Completed successfully.",
+        "",
+        f"Depots processed: {len(depots)}",
+        f"Valid vehicle tasks considered: {len(tasks)}",
         "-" * 50,
     ]
 
@@ -280,21 +309,22 @@ def main() -> int:
         raw_capacity = depot.get("MechanicHours")
 
         if depot_id is None or raw_capacity is None:
-            logger.warning("Skipping depot with missing fields", {"depot": depot})
+            logger.warning("A depot record was skipped because fields were missing.", {"depot": depot})
             continue
 
         try:
             capacity = int(raw_capacity)
         except (TypeError, ValueError):
-            logger.warning("Skipping depot with invalid MechanicHours", {"depot": depot})
+            logger.warning("A depot record was skipped because MechanicHours was invalid.", {"depot": depot})
             continue
 
         logger.info(
-            "Calculating depot schedule",
+            "Working on a depot schedule.",
             {"depot_id": depot_id, "capacity": capacity},
         )
 
         max_impact, total_duration, selected_tasks = solve_knapsack(tasks, capacity, logger)
+
         report_lines.extend(
             build_depot_report(
                 depot_id=depot_id,
@@ -306,7 +336,7 @@ def main() -> int:
         )
 
         logger.success(
-            "Depot schedule completed",
+            "A depot schedule has been completed.",
             {
                 "depot_id": depot_id,
                 "capacity": capacity,
@@ -318,14 +348,14 @@ def main() -> int:
         processed_depots += 1
 
     if processed_depots == 0:
-        reason = "No valid depots were available to process."
+        reason = "No usable depot records were found in the API response."
         logger.error(reason)
-        write_failure_report(reason)
+        write_failure_report(reason, "Check the depot data and run the script again.")
         return 1
 
     write_report(report_lines)
     logger.success(
-        "Vehicle scheduling run completed",
+        "The scheduling run finished successfully.",
         {
             "processed_depots": processed_depots,
             "report_file": str(REPORT_FILE),
