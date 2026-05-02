@@ -1,0 +1,7 @@
+Vehicle Maintenance Scheduling Output
+==================================================
+Run Status: FAILED
+Reason: Could not fetch or parse depot data.
+
+PowerShell example: $env:API_TOKEN = "real-token-here"
+Then run: python .\scheduler.py
